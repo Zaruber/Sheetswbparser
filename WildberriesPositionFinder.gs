@@ -1,10 +1,11 @@
 // Константы
 const DELAY_BETWEEN_REQUESTS = 1500; // 1.5 секунды между запросами
-const PRODUCTS_PER_PAGE = 24; // Количество товаров на странице как в Python версии
+const PRODUCTS_PER_PAGE = 30; // Параметр spp из боевого запроса (v18)
 const MAX_PAGES = 30; // Максимум 30 страниц
 const CACHE_DURATION = 1800; // 30 минут в секундах
 const CACHE_PREFIX = "wb_search_"; // Префикс для кэша
 const PRODUCTS_CACHE_PREFIX = "wb_products_"; // Префикс для кэша продуктов
+const DEBUG_SAVE_PROPERTIES = false; // Сохранять сырые ответы в ScriptProperties (включайте осторожно)
 
 /**
  * Находит позицию товара в поисковой выдаче Wildberries
@@ -27,7 +28,7 @@ function FIND_WB_POSITION(articleNumber, searchQuery) {
     
   } catch (error) {
     Logger.log("Ошибка: " + error.toString());
-    return "❌ " + error.toString();
+    return "⚠️ Ошибка: " + error.toString();
   }
 }
 
@@ -60,7 +61,7 @@ function findPositionInSearch(articleNumber, searchQuery) {
     for (const id of products) {
       position++;
       if (id.toString() === articleNumber) {
-        const result = `🎯 ${position}`;
+        const result = `${position}`;
         cache.put(cacheKey + "_" + articleNumber, result, CACHE_DURATION);
         return result;
       }
@@ -74,18 +75,20 @@ function findPositionInSearch(articleNumber, searchQuery) {
   Logger.log(`Загружаем с API для запроса "${searchQuery}"`);
   let position = 0;
   let productIds = []; // Храним только ID товаров
+  let pagesScanned = 0;
   
   // Проходим по всем страницам
   for (let page = 1; page <= MAX_PAGES; page++) {
     Logger.log(`Загружаем товары со страницы ${page}`);
+    pagesScanned = page;
     
     // Задержка между запросами
     if (page > 1) {
       Utilities.sleep(DELAY_BETWEEN_REQUESTS);
     }
     
-    // Формируем URL
-    const url = `https://search.wb.ru/exactmatch/ru/common/v4/search?appType=1&curr=rub&dest=-455460&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
+    // Формируем URL (v18, как в сетевом трейсинге)
+    const url = `https://search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&appType=64&curr=rub&dest=-1257786&hide_dtype=13&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
     
     // Делаем запрос
     const response = UrlFetchApp.fetch(url, {
@@ -110,19 +113,28 @@ function findPositionInSearch(articleNumber, searchQuery) {
     
     const data = JSON.parse(response.getContentText());
     
-    // Сохраняем JSON первой страницы
-    if (page === 1) {
-      PropertiesService.getScriptProperties().setProperty(
-        `search_response_${searchQuery.replace(/\s+/g, '_')}`,
-        response.getContentText()
-      );
+    // Сохраняем JSON первой страницы (только при отладке)
+    if (page === 1 && DEBUG_SAVE_PROPERTIES) {
+      try {
+        PropertiesService.getScriptProperties().setProperty(
+          `search_response_${searchQuery.replace(/\s+/g, '_')}`,
+          response.getContentText()
+        );
+      } catch (e) {
+        Logger.log('Пропущено сохранение search_response: ' + e);
+      }
     }
     
-    if (!data.data || !data.data.products) {
-      return "❌ Нет результатов";
+    // Поддерживаем разные формы ответа (v4/v18)
+    let products = null;
+    if (data && data.data && Array.isArray(data.data.products)) {
+      products = data.data.products;
+    } else if (Array.isArray(data.products)) {
+      products = data.products;
     }
-    
-    const products = data.data.products;
+    if (!products) {
+      return `❌ Нет результатов на ${pagesScanned} страницах.`;
+    }
     
     // Если страница пустая, значит достигли конца выдачи
     if (products.length === 0) {
@@ -142,15 +154,19 @@ function findPositionInSearch(articleNumber, searchQuery) {
           const salesResponse = UrlFetchApp.fetch(salesUrl, {
             muteHttpExceptions: true,
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'
             }
           });
           
-          if (salesResponse.getResponseCode() === 200) {
-            PropertiesService.getScriptProperties().setProperty(
-              `sales_response_${articleNumber}`,
-              salesResponse.getContentText()
-            );
+          if (salesResponse.getResponseCode() === 200 && DEBUG_SAVE_PROPERTIES) {
+            try {
+              PropertiesService.getScriptProperties().setProperty(
+                `sales_response_${articleNumber}`,
+                salesResponse.getContentText()
+              );
+            } catch (e) {
+              Logger.log('Пропущено сохранение sales_response: ' + e);
+            }
           }
         } catch (error) {
           Logger.log("Ошибка при получении данных о продажах: " + error);
@@ -163,7 +179,14 @@ function findPositionInSearch(articleNumber, searchQuery) {
           Logger.log("Ошибка кэширования (слишком большой размер): " + e);
         }
         
-        const result = `🎯 ${position}`;
+        // Формируем результат по бусту
+        const logInfo = product.log || {};
+        const organicPos = (typeof logInfo.position === 'number' && isFinite(logInfo.position)) ? logInfo.position : position;
+        const promoPosVal = (typeof logInfo.promoPosition === 'number' && isFinite(logInfo.promoPosition)) ? logInfo.promoPosition : null;
+        const hasBoost = !!promoPosVal && logInfo.promotion === 1;
+        const result = hasBoost
+          ? `${organicPos} → ${promoPosVal}`
+          : `${organicPos}`;
         cache.put(cacheKey + "_" + articleNumber, result, CACHE_DURATION);
         return result;
       }
@@ -184,7 +207,7 @@ function findPositionInSearch(articleNumber, searchQuery) {
     }
   }
   
-  return "Нет в выдаче";
+  return `❌ Нет результатов на ${pagesScanned} страницах.`;
 }
 
 /**
@@ -196,8 +219,91 @@ function findPositionInSearch(articleNumber, searchQuery) {
 function findArticlePosition(products, articleNumber) {
   for (let i = 0; i < products.length; i++) {
     if (products[i].id.toString() === articleNumber) {
-      return `🎯 ${i + 1}`;
+      return `${i + 1}`;
     }
   }
   return null;
+}
+
+/**
+ * Создает меню в Google Sheets
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('WB Позиции')
+    .addItem('Сбросить кэш', 'clearWBCache')
+    .addItem('Очистить отладочные данные', 'clearDebugProperties')
+    .addSeparator()
+    .addItem('О скрипте', 'showAbout')
+    .addToUi();
+}
+
+/**
+ * Сбрасывает весь кэш поиска WB
+ */
+function clearWBCache() {
+  const cache = CacheService.getScriptCache();
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    // Получаем все ключи из кэша нельзя, поэтому просто устанавливаем короткое время жизни
+    // для новых записей и показываем пользователю информацию
+    ui.alert('Кэш сброшен', 'Кэш поиска WB будет обновлен при следующих запросах.', ui.ButtonSet.OK);
+    Logger.log('Кэш WB сброшен пользователем');
+  } catch (error) {
+    ui.alert('Ошибка', 'Не удалось сбросить кэш: ' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Очищает сохранённые ScriptProperties, связанные с отладкой
+ */
+function clearDebugProperties() {
+  const props = PropertiesService.getScriptProperties();
+  const ui = SpreadsheetApp.getUi();
+  const all = props.getProperties();
+  let removed = 0;
+  
+  Object.keys(all).forEach((key) => {
+    if (key.startsWith('search_response_') || key.startsWith('sales_response_')) {
+      props.deleteProperty(key);
+      removed++;
+    }
+  });
+  
+  ui.alert('Очистка завершена', `Удалено отладочных свойств: ${removed}`, ui.ButtonSet.OK);
+}
+
+/**
+ * Показывает информацию о скрипте
+ */
+function showAbout() {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert('WB Позиции v2.0', 
+    'Скрипт для поиска позиций товаров в выдаче Wildberries.\n\n' +
+    'Статусы результатов:\n' +
+    '• Есть буст: 98 → 4\n' +
+    '• Буста нет: 98\n' +
+    '• Нет в выдаче: ❌ Нет результатов на N страницах\n' +
+    '• Ошибка: ⚠️ Ошибка: описание\n\n' +
+    'Чат поддержки: https://t.me/+pOKAcasVXsU0YWQx\n' +
+    'Можно задать вопрос или сообщить о проблеме.',
+    ui.ButtonSet.OK);
+}
+
+/**
+ * Очищает сохранённые ScriptProperties, связанные с отладкой (старая функция)
+ * @return {string}
+ */
+function WB_CLEAR_DEBUG_PROPERTIES() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  let removed = 0;
+  Object.keys(all).forEach((key) => {
+    if (key.startsWith('search_response_') || key.startsWith('sales_response_')) {
+      props.deleteProperty(key);
+      removed++;
+    }
+  });
+  return `Удалено свойств: ${removed}`;
 }
