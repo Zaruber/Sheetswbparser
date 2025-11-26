@@ -7,6 +7,18 @@ const CACHE_PREFIX = "wb_search_"; // Префикс для кэша
 const PRODUCTS_CACHE_PREFIX = "wb_products_"; // Префикс для кэша продуктов
 const DEBUG_SAVE_PROPERTIES = false; // Сохранять сырые ответы в ScriptProperties (включайте осторожно)
 
+// Токены из вашего запроса (они могут протухнуть обновляйте по необходимости!)
+// ИНСТРУКЦИЯ ПО ПОЛУЧЕНИЮ ТОКЕНОВ:
+// 1. Откройте сайт wildberries.ru в браузере и войдите в аккаунт.
+// 2. Нажмите F12 (или ПКМ -> Просмотреть код) -> вкладка "Network" (Сеть).
+// 3. Введите любой запрос в поиск на сайте (например, "носки") и выполните поиск.
+// 4. В списке запросов найдите запрос, начинающийся на "search?" (или "catalog?").
+// 5. Нажмите на него и перейдите во вкладку "Headers" (Заголовки).
+// 6. Найдите в разделе "Request Headers" (Заголовки запроса) строки "Authorization" и "x-pow".
+// 7. Скопируйте их значения и вставьте ниже в кавычки.
+const WB_AUTH_TOKEN = ""; // Вставьте значение Authorization (начинается с Bearer ...)
+const WB_X_POW = ""; // Вставьте значение x-pow (длинная строка с цифрами и разделителями |)
+
 /**
  * Находит позицию товара в поисковой выдаче Wildberries
  * @param {string} articleNumber - Артикул товара
@@ -87,28 +99,57 @@ function findPositionInSearch(articleNumber, searchQuery) {
       Utilities.sleep(DELAY_BETWEEN_REQUESTS);
     }
     
-    // Формируем URL (v18, как в сетевом трейсинге)
-    const url = `https://search.wb.ru/exactmatch/ru/common/v18/search?ab_testing=false&appType=64&curr=rub&dest=-1257786&hide_dtype=13&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
+    // Формируем URL (Internal API)
+    const url = `https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dflags=131072&hide_dtype=10%3B14&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false&limit=300`;
     
-    // Делаем запрос
-    const response = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      headers: {
-        'Accept': '*/*',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Connection': 'keep-alive',
-        'Origin': 'https://www.wildberries.ru',
-        'Referer': 'https://www.wildberries.ru/catalog/0/search.aspx?sort=popular&search=' + encodeURIComponent(searchQuery),
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'cross-site',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    // Делаем запрос с повторными попытками (Retry with exponential backoff)
+    let response;
+    let attempts = 0;
+    const maxAttempts = 3; // Уменьшили количество попыток, чтобы не превышать лимит времени
+    
+    while (attempts < maxAttempts) {
+      try {
+        response = UrlFetchApp.fetch(url, {
+          muteHttpExceptions: true,
+          headers: {
+            'Accept': '*/*',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Origin': 'https://www.wildberries.ru',
+            'Referer': 'https://www.wildberries.ru/catalog/0/search.aspx?sort=popular&search=' + encodeURIComponent(searchQuery),
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Authorization': WB_AUTH_TOKEN,
+            'x-pow': WB_X_POW
+          }
+        });
+        
+        if (response.getResponseCode() === 429 || response.getResponseCode() >= 500) {
+          attempts++;
+          Logger.log(`Попытка ${attempts} не удалась (Код ${response.getResponseCode()}). Ждем...`);
+          Utilities.sleep(1000 * attempts); // Простая задержка
+          continue;
+        }
+        
+        break; // Успех или другая ошибка
+      } catch (e) {
+        attempts++;
+        Logger.log(`Ошибка сети (попытка ${attempts}): ${e}`);
+        Utilities.sleep(1000 * attempts);
       }
-    });
-    
+    }
+
+    if (!response) {
+       throw new Error("Не удалось получить ответ от WB после нескольких попыток.");
+    }
+
     // Проверяем ответ
     if (response.getResponseCode() !== 200) {
-      throw new Error("Ошибка сервера WB");
+      const errorBody = response.getContentText();
+      Logger.log(`Ошибка запроса WB. Код: ${response.getResponseCode()}, Тело: ${errorBody}`);
+      throw new Error(`Ошибка сервера WB: ${response.getResponseCode()} ${errorBody.substring(0, 200)}`);
     }
     
     const data = JSON.parse(response.getContentText());
