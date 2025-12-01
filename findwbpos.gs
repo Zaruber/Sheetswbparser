@@ -17,7 +17,6 @@ const DEBUG_SAVE_PROPERTIES = false; // Сохранять сырые ответ
 // 6. Найдите в разделе "Request Headers" (Заголовки запроса) строки "Authorization" и "x-pow".
 // 7. Скопируйте их значения и вставьте ниже в кавычки.
 const WB_AUTH_TOKEN = ""; // Вставьте значение Authorization (начинается с Bearer ...)
-const WB_X_POW = ""; // Вставьте значение x-pow (длинная строка с цифрами и разделителями |)
 
 /**
  * Находит позицию товара в поисковой выдаче Wildberries
@@ -121,8 +120,7 @@ function findPositionInSearch(articleNumber, searchQuery) {
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Authorization': WB_AUTH_TOKEN,
-            'x-pow': WB_X_POW
+            'Authorization': WB_AUTH_TOKEN
           }
         });
         
@@ -347,4 +345,125 @@ function WB_CLEAR_DEBUG_PROPERTIES() {
     }
   });
   return `Удалено свойств: ${removed}`;
+}
+
+/**
+ * Находит позицию товара в рекомендациях (похожие товары) у конкурента
+ * @param {string} myArticle - Ваш артикул
+ * @param {string} competitorArticle - Артикул конкурента
+ * @return {string} Позиция товара или текст ошибки
+ * @customfunction
+ */
+function FIND_REK_POSITION(myArticle, competitorArticle) {
+  if (!myArticle || !competitorArticle) {
+    return "⚠️ Укажите оба артикула";
+  }
+
+  try {
+    myArticle = myArticle.toString();
+    competitorArticle = competitorArticle.toString();
+    return findPositionInRecommendations(myArticle, competitorArticle);
+  } catch (error) {
+    Logger.log("Ошибка: " + error.toString());
+    return "⚠️ Ошибка: " + error.toString();
+  }
+}
+
+/**
+ * Внутренняя функция поиска в рекомендациях
+ */
+function findPositionInRecommendations(myArticle, competitorArticle) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "rek_" + competitorArticle + "_" + myArticle;
+  
+  // Проверка кэша
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const urlBase = "https://recom.wb.ru/recom/ru/common/v8/search";
+  const limit = 100;
+  const maxPages = 10; // Ищем в первых 1000 товарах
+
+  for (let page = 1; page <= maxPages; page++) {
+    // Формируем параметры запроса
+    const query = "похожие " + competitorArticle;
+    const params = {
+      "ab_testing": "false",
+      "appType": "1",
+      "curr": "rub",
+      "dest": "-1257786", // Используем тот же регион, что и в основном скрипте
+      "query": query,
+      "resultset": "catalog",
+      "spp": "30",
+      "suppressSpellcheck": "false",
+      "limit": limit,
+      "page": page
+    };
+
+    // Собираем URL
+    const queryString = Object.keys(params)
+      .map(key => key + '=' + encodeURIComponent(params[key]))
+      .join('&');
+    const fullUrl = urlBase + "?" + queryString;
+
+    const options = {
+      muteHttpExceptions: true,
+      headers: {
+        'Accept': '*/*',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    };
+
+    // Добавляем токен, если он есть (для персонализации)
+    if (typeof WB_AUTH_TOKEN !== 'undefined' && WB_AUTH_TOKEN) {
+      options.headers['Authorization'] = WB_AUTH_TOKEN;
+    }
+
+    // Задержка перед запросом (кроме первой страницы)
+    if (page > 1) Utilities.sleep(500);
+
+    try {
+      const response = UrlFetchApp.fetch(fullUrl, options);
+      const code = response.getResponseCode();
+
+      if (code === 429) {
+        Utilities.sleep(2000); // Ждем и пробуем эту же страницу еще раз (упрощенно - просто пропускаем и надеемся на след итерацию или кэш)
+        page--; 
+        continue;
+      }
+
+      if (code !== 200) {
+        Logger.log(`Ошибка API рекомендаций: ${code}`);
+        continue;
+      }
+
+      const json = JSON.parse(response.getContentText());
+      
+      // Логика из Python скрипта: товары могут быть в корне или в data.products
+      let products = json.products;
+      if (!products && json.data) {
+        products = json.data.products;
+      }
+
+      if (!products || products.length === 0) {
+        if (page === 1) return "Нет рекомендаций";
+        break; 
+      }
+
+      // Ищем наш артикул
+      for (let i = 0; i < products.length; i++) {
+        if (products[i].id.toString() === myArticle) {
+          const position = (page - 1) * limit + i + 1;
+          const result = position.toString();
+          cache.put(cacheKey, result, 1800); // Кэш на 30 минут
+          return result;
+        }
+      }
+
+    } catch (e) {
+      Logger.log("Ошибка запроса: " + e);
+    }
+  }
+
+  return "Не найдено";
 }
