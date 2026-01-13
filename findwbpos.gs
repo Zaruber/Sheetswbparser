@@ -99,7 +99,7 @@ function findPositionInSearch(articleNumber, searchQuery) {
     }
     
     // Формируем URL (Internal API)
-    const url = `https://www.wildberries.ru/__internal/u-search/exactmatch/ru/common/v18/search?ab_testing=false&appType=1&curr=rub&dest=-1257786&hide_dflags=131072&hide_dtype=10%3B14&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false&limit=300`;
+    const url = `https://www.wildberries.ru/__internal/search/exactmatch/ru/common/v18/search?appType=64&curr=rub&dest=-1181900&hide_dtype=9&hide_vflags=4294967296&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
     
     // Делаем запрос с повторными попытками (Retry with exponential backoff)
     let response;
