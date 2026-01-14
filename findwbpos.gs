@@ -18,14 +18,25 @@ const DEBUG_SAVE_PROPERTIES = false; // Сохранять сырые ответ
 // 7. Скопируйте их значения и вставьте ниже в кавычки.
 const WB_AUTH_TOKEN = ""; // Вставьте значение Authorization (начинается с Bearer ...)
 
+// Маппинг городов и их dest параметров
+const CITY_MAPPING = {
+  "MSK": -445298,   // Москва
+  "EKB": -5818883,  // Екатеринбург
+  "KZN": -2133462,  // Казань
+  "KRY": 12358058,  // Краснодар
+  "NSK": -364763,   // Новосибирск
+  "SPB": -1181900   // Санкт-Петербург (по умолчанию)
+};
+
 /**
  * Находит позицию товара в поисковой выдаче Wildberries
- * @param {string} articleNumber - Артикул товара
- * @param {string} searchQuery - Поисковый запрос
- * @return {string} Позиция товара или текст ошибки
+ * @param {string} articleNumber Артикул товара
+ * @param {string} searchQuery Поисковый запрос
+ * @param {string} [city] Код города: MSK, EKB, KZN, KRY, NSK, SPB (по умолчанию)
+ * @return {string} Позиция товара (например "12" или "12 → 5")
  * @customfunction
  */
-function FIND_WB_POSITION(articleNumber, searchQuery) {
+function FIND_WB_POSITION(articleNumber, searchQuery, city) {
   if (!articleNumber || !searchQuery) {
     return "⚠️ Укажите артикул и запрос";
   }
@@ -35,7 +46,7 @@ function FIND_WB_POSITION(articleNumber, searchQuery) {
     searchQuery = searchQuery.toString().trim().toLowerCase();
     
     // Получаем позицию товара (с использованием кэша)
-    return findPositionInSearch(articleNumber, searchQuery);
+    return findPositionInSearch(articleNumber, searchQuery, city);
     
   } catch (error) {
     Logger.log("Ошибка: " + error.toString());
@@ -47,12 +58,18 @@ function FIND_WB_POSITION(articleNumber, searchQuery) {
  * Ищет позицию товара в результатах поиска
  * @param {string} articleNumber - Артикул товара
  * @param {string} searchQuery - Поисковый запрос
+ * @param {string} [city] - Код города
  * @return {string} Позиция товара или текст ошибки
  */
-function findPositionInSearch(articleNumber, searchQuery) {
+function findPositionInSearch(articleNumber, searchQuery, city) {
+  // Определяем dest по городу
+  const cityKey = (city || "SPB").toString().toUpperCase();
+  const dest = CITY_MAPPING[cityKey] || CITY_MAPPING["SPB"];
+  
   const cache = CacheService.getScriptCache();
-  const cacheKey = CACHE_PREFIX + searchQuery;
-  const productsCacheKey = PRODUCTS_CACHE_PREFIX + searchQuery;
+  // Добавляем город в ключ кэша, чтобы результаты не смешивались
+  const cacheKey = CACHE_PREFIX + searchQuery + "_" + cityKey;
+  const productsCacheKey = PRODUCTS_CACHE_PREFIX + searchQuery + "_" + cityKey;
   
   // Пробуем получить позицию из кэша
   const cachedPosition = cache.get(cacheKey + "_" + articleNumber);
@@ -99,7 +116,7 @@ function findPositionInSearch(articleNumber, searchQuery) {
     }
     
     // Формируем URL (Internal API)
-    const url = `https://www.wildberries.ru/__internal/search/exactmatch/ru/common/v18/search?appType=64&curr=rub&dest=-1181900&hide_dtype=9&hide_vflags=4294967296&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
+    const url = `https://www.wildberries.ru/__internal/search/exactmatch/ru/common/v18/search?appType=64&curr=rub&dest=${dest}&hide_dtype=9&hide_vflags=4294967296&inheritFilters=false&lang=ru&page=${page}&query=${encodeURIComponent(searchQuery)}&resultset=catalog&sort=popular&spp=${PRODUCTS_PER_PAGE}&suppressSpellcheck=false`;
     
     // Делаем запрос с повторными попытками (Retry with exponential backoff)
     let response;
@@ -318,15 +335,22 @@ function clearDebugProperties() {
  */
 function showAbout() {
   const ui = SpreadsheetApp.getUi();
-  ui.alert('WB Позиции v2.0', 
+  ui.alert('WB Позиции v2.1', 
     'Скрипт для поиска позиций товаров в выдаче Wildberries.\n\n' +
+    'Функция: =FIND_WB_POSITION(артикул; запрос; [город])\n\n' +
+    'Города (опционально):\n' +
+    '• SPB - Санкт-Петербург (по умолчанию)\n' +
+    '• MSK - Москва\n' +
+    '• EKB - Екатеринбург\n' +
+    '• KZN - Казань\n' +
+    '• KRY - Краснодар\n' +
+    '• NSK - Новосибирск\n\n' +
     'Статусы результатов:\n' +
     '• Есть буст: 98 → 4\n' +
     '• Буста нет: 98\n' +
     '• Нет в выдаче: ❌ Нет результатов на N страницах\n' +
     '• Ошибка: ⚠️ Ошибка: описание\n\n' +
-    'Чат поддержки: https://t.me/+pOKAcasVXsU0YWQx\n' +
-    'Можно задать вопрос или сообщить о проблеме.',
+    'Чат поддержки: https://t.me/+pOKAcasVXsU0YWQx',
     ui.ButtonSet.OK);
 }
 
@@ -391,7 +415,7 @@ function findPositionInRecommendations(myArticle, competitorArticle) {
       "ab_testing": "false",
       "appType": "1",
       "curr": "rub",
-      "dest": "-1257786", // Используем тот же регион, что и в основном скрипте
+      "dest": "-1257786", // Используем hardcoded регион для рекомендаций, так как в задаче просили поменять только поиск
       "query": query,
       "resultset": "catalog",
       "spp": "30",
